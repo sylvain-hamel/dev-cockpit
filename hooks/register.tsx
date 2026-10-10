@@ -14,6 +14,8 @@ import {
   issueFromBranch,
   issueFromText,
   isMainCheckout,
+  vsCodeCliOf,
+  vsCodeInstallDirs,
   labelsKey,
   labelsOf,
   launchApps,
@@ -327,9 +329,33 @@ async function openExternal($: EngineInterface, target: string): Promise<void> {
   await $.process.run(['rundll32.exe', 'url.dll,FileProtocolHandler', target])
 }
 
+async function runVsCodeFromInstall($: EngineInterface, path: string): Promise<boolean> {
+  const dirs = vsCodeInstallDirs(await $.env.get('LOCALAPPDATA'), await $.env.get('ProgramFiles'))
+  for (const dir of dirs) {
+    const launcher = await readText($, `${dir}\\bin\\code.cmd`)
+    const cli = launcher === null ? null : vsCodeCliOf(launcher, dir)
+    if (cli === null) continue
+    try {
+      const ran = await $.process.run([`${dir}\\Code.exe`, cli, path], {
+        env: { ELECTRON_RUN_AS_NODE: '1', VSCODE_DEV: '' },
+      })
+      if (ran.exitCode === 0) return true
+    } catch {
+      continue
+    }
+  }
+  return false
+}
+
 async function openInVsCode($: EngineInterface, path: string): Promise<void> {
-  const ran = await $.process.run(['cmd.exe', '/d', '/c', 'code', path])
-  if (ran.exitCode !== 0) $.ui.toast('Could not start VS Code (is `code` on PATH?)')
+  let isOpened = false
+  try {
+    isOpened = (await $.process.run(['cmd.exe', '/d', '/c', 'code', path])).exitCode === 0
+  } catch {
+    isOpened = false
+  }
+  if (isOpened || (await runVsCodeFromInstall($, path))) return
+  $.ui.toast('Could not start VS Code: install it, or put its `code` command on PATH')
 }
 
 let isProbing = false

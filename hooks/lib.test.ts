@@ -26,6 +26,8 @@ import {
   toWindowsPath,
   isUnder,
   isMainCheckout,
+  vsCodeCliOf,
+  vsCodeInstallDirs,
   describeProcess,
   processOfPort,
   issueOf,
@@ -33,6 +35,24 @@ import {
   selectWorktree,
   worktreesOf,
 } from './lib'
+
+describe('VS Code without PATH', () => {
+  test('lists the usual install folders', async () => {
+    expect(vsCodeInstallDirs('C:\\Users\\me\\AppData\\Local', 'C:\\Program Files')).toEqual([
+      'C:\\Users\\me\\AppData\\Local\\Programs\\Microsoft VS Code',
+      'C:\\Program Files\\Microsoft VS Code',
+    ])
+    expect(vsCodeInstallDirs(undefined, undefined)).toEqual([])
+  })
+
+  test('finds the command line entry point from the launcher', async () => {
+    const recent = '"%~dp0..\\Code.exe" "%~dp0..\\88e44fa0e0\\resources\\app\\out\\cli.js" %*'
+    const older = '"%~dp0..\\Code.exe" "%~dp0..\\resources\\app\\out\\cli.js" %*'
+    expect(vsCodeCliOf(recent, 'C:\\VS')).toBe('C:\\VS\\88e44fa0e0\\resources\\app\\out\\cli.js')
+    expect(vsCodeCliOf(older, 'C:\\VS')).toBe('C:\\VS\\resources\\app\\out\\cli.js')
+    expect(vsCodeCliOf('@echo off', 'C:\\VS')).toBeNull()
+  })
+})
 
 describe('band details', () => {
   test('tells the main checkout from a linked worktree', async () => {

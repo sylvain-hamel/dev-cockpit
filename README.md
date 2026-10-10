@@ -47,7 +47,7 @@ Pour une app hors Node ou à l'adresse fixe, un fichier `.claude/dev-cockpit.jso
 
 ## Installation
 
-Prérequis : Windows, et des séances Claude Code locales (le mod ne fonctionne pas dans les séances cloud). Facultatif : `gh` pour le titre des issues, la commande `code` pour VS Code, Windows Terminal pour les tâches.
+Prérequis : Windows, et des séances Claude Code locales (le mod ne fonctionne pas dans les séances cloud). Facultatif : `gh` pour le titre des issues, VS Code (trouvé via la commande `code`, sinon dans son dossier d'installation habituel), Windows Terminal pour les tâches.
 
 Dans un terminal, lancer `claude`, puis à l'invite :
 

@@ -27,6 +27,7 @@ type Project = {
   branch: string
   favorites?: string[]
   terminalFails?: boolean
+  isCodeMissing?: boolean
   isLinkedWorktree?: boolean
   store?: Record<string, unknown>
 }
@@ -93,6 +94,7 @@ function mockProject(on: On, project: Project): Calls {
     if (command === 'powershell.exe') return ok(JSON.stringify(project.probe))
     if (command === 'gh') return ok('Actions on messages\n')
     if (command === 'wt.exe' && project.terminalFails === true) return ok('', 1)
+    if (command === 'cmd.exe' && args[2] === 'code' && project.isCodeMissing === true) return ok('', 1)
     return ok('')
   })
   return calls
@@ -316,3 +318,29 @@ test('a branch issue is not replaced by a card mentioned later', async ($, on) =
   await ui.unmount()
 })
 
+
+test('VS Code opens from its install folder when code is not on PATH', async ($, on) => {
+  const install = 'C:/Users/me/AppData/Local/Programs/Microsoft VS Code'
+  const calls = mockProject(on, {
+    files: {
+      ...MONOREPO,
+      [`${install}/bin/code.cmd`]: '"%~dp0..\\Code.exe" "%~dp0..\\abc123\\resources\\app\\out\\cli.js" %*',
+    },
+    probe: [],
+    branch: 'main',
+    isCodeMissing: true,
+  })
+  mock.env(on, { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' })
+
+  await $.command.run({ command: 'cockpit', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'dev-cockpit', surface: 'terminal', ...BAND } as never)
+  await ui.press({ key: 'vscode' })
+  await ui.unmount()
+
+  const program = 'C:\\Users\\me\\AppData\\Local\\Programs\\Microsoft VS Code'
+  expect(calls.ran).toContainEqual([
+    `${program}\\Code.exe`,
+    `${program}\\abc123\\resources\\app\\out\\cli.js`,
+    'C:\\work\\app',
+  ])
+})

@@ -362,6 +362,19 @@ export function issueFromBranch(branch: string | null): number | null {
   return match === null ? null : Number(match[1])
 }
 
+export function vsCodeInstallDirs(localAppData: string | undefined, programFiles: string | undefined): string[] {
+  return [
+    ...(localAppData === undefined ? [] : [`${localAppData}\\Programs\\Microsoft VS Code`]),
+    ...(programFiles === undefined ? [] : [`${programFiles}\\Microsoft VS Code`]),
+  ]
+}
+
+export function vsCodeCliOf(launcher: string, installDir: string): string | null {
+  const match = /%~dp0\.\.\\((?:[^"\\]+\\)*)resources\\app\\out\\cli\.js/i.exec(launcher)
+  if (match === null) return null
+  return `${installDir}\\${match[1] ?? ''}resources\\app\\out\\cli.js`
+}
+
 export function issueOf(raw: unknown): Issue | null {
   if (typeof raw !== 'object' || raw === null) return null
   const { number, url, title, source } = raw as Record<string, unknown>
