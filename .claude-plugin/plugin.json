@@ -1,0 +1,7 @@
+{
+  "name": "dev-cockpit",
+  "version": "0.1.0",
+  "description": "Pane showing the active worktree, the apps to launch, Node processes and the session's GitHub issue",
+  "author": { "name": "Sylvain Hamel" },
+  "types": "./types/index.d.ts"
+}
