@@ -1,0 +1,6 @@
+{
+  "name": "dev-cockpit",
+  "description": "Dev cockpit for Claude Code on Windows: worktree, local apps, favorite tasks and the session's GitHub issue above the prompt",
+  "owner": { "name": "Sylvain Hamel" },
+  "plugins": [{ "name": "dev-cockpit", "source": "./" }]
+}

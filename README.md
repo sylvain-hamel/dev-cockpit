@@ -47,20 +47,36 @@ Pour une app hors Node ou à l'adresse fixe, un fichier `.claude/dev-cockpit.jso
 
 ## Installation
 
-Dans `~/.claude/settings.json` :
+Prérequis : Windows, et des séances Claude Code locales (le mod ne fonctionne pas dans les séances cloud). Facultatif : `gh` pour le titre des issues, la commande `code` pour VS Code, Windows Terminal pour les tâches.
+
+Dans un terminal, lancer `claude`, puis à l'invite :
+
+```
+/plugin install dev-cockpit --marketplace sylvain-hamel/dev-cockpit
+```
+
+Répondre `y` pour ajouter le marketplace, puis choisir la portée « user » (Entrée). Le mod se charge ensuite dans toutes les séances locales, celles de l'app desktop comprises. La commande ne s'exécute pas depuis l'onglet Code de l'app desktop : il faut un terminal.
+
+Mise à jour vers la dernière version poussée :
+
+```bash
+claude plugin update dev-cockpit@dev-cockpit
+```
+
+## Développement
+
+Pour travailler sur le mod depuis son dossier, sans passer par l'installation, dans `~/.claude/settings.json` (et sans installer le plugin en parallèle, pour ne pas le charger deux fois) :
 
 ```json
 {
   "env": {
-    "CLAUDE_CODE_PLUGIN_DIRS": "C:\\Users\\redho\\Local Documents\\dev-cockpit",
+    "CLAUDE_CODE_PLUGIN_DIRS": "C:\\chemin\\vers\\dev-cockpit",
     "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"
   }
 }
 ```
 
-Le mod se charge dans chaque nouvelle conversation. Avec `CLAUDE_CODE_PLUGIN_DIR_WATCH`, une modification du dossier le recharge aussi dans les séances de l'app desktop déjà ouvertes.
-
-## Développement
+Le mod se charge alors dans chaque nouvelle conversation, et une modification du dossier le recharge dans les séances déjà ouvertes.
 
 ```bash
 claude plugin validate .
