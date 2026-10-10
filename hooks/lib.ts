@@ -1,20 +1,24 @@
-import type { AppLink, NodeProcess } from '../types'
+import type { AppLink, ConfiguredApp, DetectedApp, Issue, NodeProcess } from '../types'
+
+export type { ConfiguredApp, DetectedApp }
 
 export type ProbeRow = {
   pid: number
+  ppid?: number
   name: string
   cmd: string
+  cwd?: string | null
   mem: number
   ports: number[] | number | null
 }
 
-export type DetectedApp = { port: number; app: string | null }
+
 
 export type Classified = { processes: NodeProcess[]; helperCount: number; detected: DetectedApp[] }
 
 export type PackageInfo = { scripts: Record<string, string>; isElectron: boolean }
 
-export type ConfiguredApp = { name: string; url: string; label?: string }
+
 
 export type ProjectConfig = { apps?: ConfiguredApp[]; startCommand?: string }
 
@@ -117,16 +121,90 @@ function rank(port: number): number {
 }
 
 export function detectedOf(processes: readonly NodeProcess[]): DetectedApp[] {
-  const seen = new Map<number, string | null>()
+  const seen = new Map<number, DetectedApp>()
   for (const one of processes) {
     if (/electron/i.test(one.role)) continue
     for (const port of one.ports) {
-      if (!DEBUG_PORTS.has(port) && !seen.has(port)) seen.set(port, one.app)
+      if (!DEBUG_PORTS.has(port) && !seen.has(port)) seen.set(port, { port, app: one.app, dir: one.dir })
     }
   }
-  return [...seen.entries()]
-    .map(([port, app]) => ({ port, app }))
-    .sort((a, b) => rank(a.port) - rank(b.port) || a.port - b.port)
+  return [...seen.values()].sort((a, b) => rank(a.port) - rank(b.port) || a.port - b.port)
+}
+
+export function relativeDir(cwd: string | null | undefined, root: string): string | null {
+  if (cwd === null || cwd === undefined || cwd.trim() === '') return null
+  const path = normalizePath(cwd)
+  const base = normalizePath(root)
+  if (path === base) return '.'
+  if (!path.startsWith(`${base}\\`)) return null
+  const original = cwd.trim().replace(/\//g, '\\').replace(/\\+$/, '')
+  return original.slice(base.length + 1).replace(/\\/g, '/')
+}
+
+function normalizePath(path: string): string {
+  return path.trim().replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+}
+
+export function isUnder(cmd: string, path: string): boolean {
+  const command = cmd.replace(/\//g, '\\').toLowerCase()
+  const target = normalizePath(path)
+  if (target === '') return false
+  let index = command.indexOf(target)
+  while (index !== -1) {
+    const after = command[index + target.length]
+    if (after === undefined || after === '\\' || after === '"' || after === "'" || after === ' ') return true
+    index = command.indexOf(target, index + 1)
+  }
+  return false
+}
+
+export function worktreesOf(porcelain: string): string[] {
+  return porcelain
+    .split(/\r?\n/)
+    .filter(line => line.startsWith('worktree '))
+    .map(line => line.slice('worktree '.length).trim())
+}
+
+export function isMainCheckout(worktrees: readonly string[], root: string): boolean {
+  const main = worktrees[0]
+  return main === undefined || normalizePath(main) === normalizePath(root)
+}
+
+export function processOfPort(processes: readonly NodeProcess[], port: number): NodeProcess | undefined {
+  return processes.find(one => one.ports.includes(port))
+}
+
+export function describeProcess(owner: NodeProcess | undefined, url: string): string[] {
+  if (owner === undefined) return [url]
+  return [
+    owner.role,
+    ...(owner.dir === null ? [] : [owner.dir === '.' ? 'launched from ./' : `launched from ./${owner.dir}`]),
+    `pid ${owner.pid} · ${owner.memoryMb} MB`,
+    url,
+  ]
+}
+
+export function nestedWorktrees(worktrees: readonly string[], root: string): string[] {
+  const base = normalizePath(root)
+  return worktrees.filter(path => normalizePath(path).startsWith(`${base}\\`))
+}
+
+export function selectWorktree(rows: readonly ProbeRow[], root: string, excluded: readonly string[]): ProbeRow[] {
+  const isOwn = (row: ProbeRow) =>
+    isUnder(row.cmd ?? '', root) && !excluded.some(path => isUnder(row.cmd ?? '', path))
+  const isOther = (row: ProbeRow) => excluded.some(path => isUnder(row.cmd ?? '', path))
+  const selected = new Set(rows.filter(isOwn).map(row => row.pid))
+  let isGrowing = true
+  while (isGrowing) {
+    isGrowing = false
+    for (const row of rows) {
+      if (!selected.has(row.pid) && row.ppid !== undefined && selected.has(row.ppid) && !isOther(row)) {
+        selected.add(row.pid)
+        isGrowing = true
+      }
+    }
+  }
+  return rows.filter(row => selected.has(row.pid))
 }
 
 export function classify(rows: readonly ProbeRow[], root: string): Classified {
@@ -138,10 +216,12 @@ export function classify(rows: readonly ProbeRow[], root: string): Classified {
       helperCount += 1
       continue
     }
+    const dir = relativeDir(row.cwd, root)
     processes.push({
       pid: row.pid,
       role,
-      app: appOf(row.cmd ?? '', root),
+      app: dir === null ? appOf(row.cmd ?? '', root) : dir === '.' ? null : baseName(dir),
+      dir,
       memoryMb: Math.round(row.mem / 1048576),
       ports: portsOf(row),
     })
@@ -156,26 +236,64 @@ export function portOfUrl(url: string): number | null {
   return match[1] === undefined ? (url.toLowerCase().startsWith('https') ? 443 : 80) : Number(match[1])
 }
 
-export function launchApps(configured: readonly ConfiguredApp[], detected: readonly DetectedApp[]): AppLink[] {
+export function defaultAppName(dir: string | null, app: string | null, worktree: string): string {
+  if (dir === '.') return worktree
+  if (dir !== null) return baseName(dir)
+  return app ?? 'app'
+}
+
+export function launchApps(
+  configured: readonly ConfiguredApp[],
+  detected: readonly DetectedApp[],
+  labels: Readonly<Record<string, string>>,
+  worktree: string,
+): AppLink[] {
   const running = new Set(detected.map(one => one.port))
+  const claimed = new Set<number | null>()
   const links: AppLink[] = configured.map(app => {
     const port = portOfUrl(app.url)
-    return {
-      name: app.name,
-      label: app.label ?? `Open ${app.name}`,
-      url: app.url,
-      isRunning: port === null ? null : running.has(port),
-    }
+    claimed.add(port)
+    return { dir: null, port, label: app.label ?? app.name, url: app.url, isRunning: port === null ? null : running.has(port) }
   })
-  const claimed = new Set(configured.map(app => portOfUrl(app.url)))
-  const rest = detected.filter(one => !claimed.has(one.port))
-  const names = rest.map(one => one.app)
-  for (const one of rest) {
-    const isUnique = one.app !== null && names.filter(name => name === one.app).length === 1
-    const name = isUnique ? (one.app as string) : rest.length === 1 && configured.length === 0 ? 'app' : `app :${one.port}`
-    links.push({ name, label: `Open ${name}`, url: `http://localhost:${one.port}`, isRunning: true })
+  for (const one of detected.filter(item => !claimed.has(item.port))) {
+    const name = (one.dir === null ? undefined : labels[one.dir]) ?? defaultAppName(one.dir, one.app, worktree)
+    links.push({ dir: one.dir, port: one.port, label: `${name} (${one.port})`, url: `http://localhost:${one.port}`, isRunning: true })
   }
   return links
+}
+
+export type AppDir = { dir: string; ports: number[] }
+
+export function appDirsOf(detected: readonly DetectedApp[], labels: Readonly<Record<string, string>>): AppDir[] {
+  const dirs = new Map<string, number[]>()
+  for (const one of detected) {
+    if (one.dir !== null) dirs.set(one.dir, [...(dirs.get(one.dir) ?? []), one.port])
+  }
+  for (const dir of Object.keys(labels)) {
+    if (!dirs.has(dir)) dirs.set(dir, [])
+  }
+  return [...dirs.entries()]
+    .map(([dir, ports]) => ({ dir, ports: [...ports].sort((a, b) => a - b) }))
+    .sort((a, b) => (a.dir === '.' ? -1 : 0) - (b.dir === '.' ? -1 : 0) || a.dir.localeCompare(b.dir))
+}
+
+export function labelsOf(raw: unknown): Record<string, string> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>).filter(
+      (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim() !== '',
+    ),
+  )
+}
+
+export function withLabel(labels: Readonly<Record<string, string>>, dir: string, label: string): Record<string, string> {
+  const { [dir]: _, ...rest } = labels
+  const trimmed = label.trim()
+  return trimmed === '' ? rest : { ...rest, [dir]: trimmed }
+}
+
+export function labelsKey(repoRoot: string): string {
+  return `labels:${repoRoot.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()}`
 }
 
 export function parsePackage(text: string | null): PackageInfo | null {
@@ -196,7 +314,7 @@ function appsOf(raw: unknown): ConfiguredApp[] {
   return raw.flatMap(item => {
     if (typeof item !== 'object' || item === null) return []
     const { name, url, label } = item as Record<string, unknown>
-    if (typeof name !== 'string' || typeof url !== 'string' || !/^https?:\/\//.test(url)) return []
+    if (typeof name !== 'string' || name === '' || typeof url !== 'string' || !/^https?:\/\//.test(url)) return []
     return [{ name, url, ...(typeof label === 'string' ? { label } : {}) }]
   })
 }
@@ -242,6 +360,14 @@ export function issueFromBranch(branch: string | null): number | null {
   if (branch === null) return null
   const match = /(?:^|\/)(?:issues?[-_]?|gh[-_]?)?(\d{1,6})(?:[-_]|$)/i.exec(branch)
   return match === null ? null : Number(match[1])
+}
+
+export function issueOf(raw: unknown): Issue | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const { number, url, title, source } = raw as Record<string, unknown>
+  if (typeof number !== 'number' || typeof url !== 'string' || !/^https:\/\//.test(url)) return null
+  if (source !== 'command' && source !== 'prompt' && source !== 'branch') return null
+  return { number, url, title: typeof title === 'string' ? title : null, source }
 }
 
 export function issueFromArgs(args: string): number | null | 'clear' {
