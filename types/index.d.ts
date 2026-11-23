@@ -41,6 +41,15 @@ export type Issue = {
   source: 'command' | 'prompt' | 'branch'
 }
 
+export type Phase = 'coding' | 'reviewing' | 'filming' | 'finishing' | 'finished' | 'waiting'
+
+export type Card = {
+  issue: number
+  keywords: string | null
+  phase: Phase | null
+  resume: Phase | null
+}
+
 export type Script = {
   id: string
   dir: string
@@ -61,6 +70,7 @@ declare module 'claude-code' {
     'dev-cockpit': {
       snapshot: Snapshot | null
       issue: Issue | null
+      card: Card | null
       catalog: TaskCatalog | null
       favorites: string[]
       labels: Record<string, string>

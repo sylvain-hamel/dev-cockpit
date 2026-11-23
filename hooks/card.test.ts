@@ -1,0 +1,181 @@
+import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+import type { On } from 'claude-code'
+
+import { atTurnEnd, atUserPrompt, bareIssue, cardOf, cardTitle, keywordsOf, newCard, withPhase } from './card'
+
+const SET_TITLE = 'mcp__ccd_session_mgmt__set_session_title'
+const PHASE_TOOL = 'mcp__dev-cockpit__card_phase'
+
+describe('card helpers', () => {
+  test('a prompt that is nothing but an issue', async () => {
+    expect(bareIssue('#1233')).toBe(1233)
+    expect(bareIssue('  1233 ')).toBe(1233)
+    expect(bareIssue('https://github.com/acme/app/issues/1233')).toBe(1233)
+    expect(bareIssue('https://github.com/acme/app/issues/1233/')).toBe(1233)
+    expect(bareIssue('look at #1233')).toBeNull()
+    expect(bareIssue('#1233 please')).toBeNull()
+    expect(bareIssue('')).toBeNull()
+  })
+
+  test('keywords keep four words, no punctuation or number', async () => {
+    expect(keywordsOf('"Role Admin"')).toBe('Role Admin')
+    expect(keywordsOf('Rôle admin, permissions: équipe, export, csv')).toBe('Rôle admin permissions équipe')
+    expect(keywordsOf('#1233 Role Admin\nsecond line')).toBe('Role Admin')
+    expect(keywordsOf('  ...  ')).toBeNull()
+    expect(keywordsOf(null)).toBeNull()
+  })
+
+  test('the title puts the phase in front of the card', async () => {
+    const card = newCard(1233, 'Role Admin')
+    expect(cardTitle(card)).toBe('#1233 Role Admin')
+    expect(cardTitle(withPhase(card, 'coding'))).toBe('Coding - #1233 Role Admin')
+    expect(cardTitle(withPhase(card, 'reviewing'))).toBe('Reviewing - #1233 Role Admin')
+    expect(cardTitle(withPhase(card, 'filming'))).toBe('Filming - #1233 Role Admin')
+    expect(cardTitle(withPhase(card, 'waiting'))).toBe('Waiting on user - #1233 Role Admin')
+    expect(cardTitle(withPhase(card, 'finishing'))).toBe('Finishing - #1233 Role Admin')
+    expect(cardTitle(withPhase(card, 'finished'))).toBe('Finished - #1233 Role Admin')
+    expect(cardTitle(newCard(7, null))).toBe('#7')
+  })
+
+  test('after waiting on the user, the card goes back to coding, or to finishing', async () => {
+    const card = newCard(1, 'x')
+    const after = (phase: 'coding' | 'reviewing' | 'filming' | 'finishing') =>
+      atUserPrompt(atTurnEnd(withPhase(card, phase))).phase
+    expect(atTurnEnd(withPhase(card, 'coding')).phase).toBe('waiting')
+    expect(after('coding')).toBe('coding')
+    expect(after('reviewing')).toBe('coding')
+    expect(after('filming')).toBe('coding')
+    expect(after('finishing')).toBe('finishing')
+    expect(atUserPrompt(withPhase(atTurnEnd(withPhase(card, 'finishing')), 'waiting')).phase).toBe('finishing')
+    expect(atUserPrompt(atTurnEnd(card)).phase).toBeNull()
+  })
+
+  test('finished stays through the end of a turn', async () => {
+    expect(atTurnEnd(withPhase(newCard(1, 'x'), 'finished')).phase).toBe('finished')
+  })
+
+  test('a stored card is read back, junk is not', async () => {
+    const card = withPhase(newCard(5, 'a b'), 'reviewing')
+    expect(cardOf(JSON.parse(JSON.stringify(card)))).toEqual(card)
+    expect(cardOf({ issue: 5, phase: 'dancing' })?.phase).toBeNull()
+    expect(cardOf('x')).toBeNull()
+  })
+})
+
+type Session = { titles: string[]; store?: Record<string, unknown> }
+
+function ok(stdout: string) {
+  return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+}
+
+function mockSession(on: On, session: Session): void {
+  mock.store(on, session.store ?? {})
+  on('classic.UserPromptSubmit', () => ({}))
+  on('turn.complete', () => ({ text: '' }))
+  on('session.id', () => ({ value: 'S1' }))
+  on('session.messages', () => ({ value: [] }) as never)
+  on('session.cwd', () => ({ value: 'C:/work/app' }))
+  on('session.repo', () => ({
+    value: { root: 'C:/work/app', remote: 'https://github.com/acme/app.git', internal: false, name: 'app' },
+  }))
+  on('process.run', ($, e) => {
+    if (e.argv[0] === 'gh') return ok('Add an admin role to the team settings\n')
+    if (e.argv[0] === 'git' && e.argv[2] === '--abbrev-ref') return ok('main\n')
+    return ok('')
+  })
+  on('model.complete', () => ({
+    value: { isAnswered: true, text: 'Role Admin', usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } },
+  }) as never)
+  on('tool.call', { tool: SET_TITLE } as never, ($, e) => {
+    session.titles.push(String((e as unknown as { title: string }).title))
+    return { result: 'renamed' } as never
+  })
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 500; i += 1) await Promise.resolve()
+}
+
+type Turns = { turn: { complete: (e: unknown) => Promise<unknown> } }
+
+async function endTurn($: Engine): Promise<void> {
+  await ($ as unknown as Turns).turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
+  await settle()
+}
+
+async function prompt($: Engine, text: string) {
+  return $.classic.UserPromptSubmit({ prompt: text, source: 'user' })
+}
+
+test('an issue alone names the conversation, and the phase prefixes it', async ($, on) => {
+  const session: Session = { titles: [] }
+  mockSession(on, session)
+
+  await prompt($, '#1233')
+  await settle()
+  expect(session.titles.at(-1)).toBe('#1233 Role Admin')
+
+  const coded = await $.tool.call({ tool: PHASE_TOOL, phase: 'coding' } as never)
+  expect(coded.text ?? JSON.stringify(coded.result)).toContain('Coding - #1233 Role Admin')
+  expect(session.titles.at(-1)).toBe('Coding - #1233 Role Admin')
+
+  await endTurn($)
+  expect(session.titles.at(-1)).toBe('Waiting on user - #1233 Role Admin')
+
+  await prompt($, 'ok, continue')
+  await settle()
+  expect(session.titles.at(-1)).toBe('Coding - #1233 Role Admin')
+
+  await $.tool.call({ tool: PHASE_TOOL, phase: 'reviewing' } as never)
+  expect(session.titles.at(-1)).toBe('Reviewing - #1233 Role Admin')
+  await $.tool.call({ tool: PHASE_TOOL, phase: 'filming', keywords: 'Admin role demo' } as never)
+  expect(session.titles.at(-1)).toBe('Filming - #1233 Admin role demo')
+  await $.tool.call({ tool: PHASE_TOOL, phase: 'finished' } as never)
+  await endTurn($)
+  expect(session.titles.at(-1)).toBe('Finished - #1233 Admin role demo')
+})
+
+test('a prompt that says more than an issue does not rename', async ($, on) => {
+  const session: Session = { titles: [] }
+  mockSession(on, session)
+
+  await prompt($, 'can you look at #1233?')
+  await settle()
+  await endTurn($)
+  expect(session.titles).toEqual([])
+})
+
+test('the phase tool asks for an issue when the session has none', async ($, on) => {
+  const session: Session = { titles: [] }
+  mockSession(on, session)
+
+  const refused = await $.tool.call({ tool: PHASE_TOOL, phase: 'coding' } as never)
+  expect(JSON.stringify(refused)).toContain('pass `issue`')
+
+  await $.tool.call({ tool: PHASE_TOOL, phase: 'coding', issue: 42 } as never)
+  expect(session.titles.at(-1)).toBe('Coding - #42 Role Admin')
+})
+
+test('the user answer after waiting brings back the phase and asks Claude to correct it', async ($, on) => {
+  const session: Session = {
+    titles: [],
+    store: { 'card:S1': { issue: 9, keywords: 'Export', phase: 'finishing', resume: null } },
+  }
+  mockSession(on, session)
+
+  await endTurn($)
+  expect(session.titles.at(-1)).toBe('Waiting on user - #9 Export')
+
+  const answered = await prompt($, 'ok pour la carte, continue')
+  await settle()
+  expect(session.titles.at(-1)).toBe('Finishing - #9 Export')
+  expect(answered.additionalContext?.join(' ')).toContain('"Finishing - #9 Export"')
+  expect(answered.additionalContext?.join(' ')).toContain('call card_phase')
+
+  await $.tool.call({ tool: PHASE_TOOL, phase: 'finished' } as never)
+  await endTurn($)
+  const later = await prompt($, 'place la PR')
+  expect(session.titles.at(-1)).toBe('Finished - #9 Export')
+  expect(later.additionalContext).toBeUndefined()
+})

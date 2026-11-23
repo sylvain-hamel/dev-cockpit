@@ -35,6 +35,27 @@ Le dossier de lancement d'un serveur est son dossier de travail réel, lu dans l
 
 L'issue affichée est la carte principale de la séance. Elle vient, dans l'ordre : de `/issue <numéro | url>`, sinon du premier `#N` (ou lien d'issue) écrit dans la conversation, sinon d'un numéro dans le nom de la branche. Une fois fixée, elle ne change plus quand d'autres cartes sont citées ou créées ; seul `/issue` la remplace, et `/issue clear` l'efface. Elle est mémorisée par séance et survit aux redémarrages.
 
+## Nom de la conversation
+
+Une conversation ouverte avec seulement un numéro d'issue (`#1233`, `1233` ou le lien de l'issue) prend le nom de la carte : son numéro et au plus 4 mots-clés tirés de son titre (choisis par Haiku), par exemple `#1233 Role Admin`. `/issue <numéro>` fait de même.
+
+Au fil du travail, un préfixe indique où en est la carte. Les phases sont génériques : quand les consignes du projet (`AGENTS.md`, `CLAUDE.md`) décrivent un workflow, Claude range chacune de ses étapes dans la phase qui en a l'intention ; sans workflow, il prend le sens courant de chaque phase.
+
+| Préfixe | Intention | Posé par |
+| --- | --- | --- |
+| `Coding - ` | construction de la carte, ses vérifications de fin, les retouches demandées pendant la validation | Claude |
+| `Reviewing - ` | revue du code ou d'une PR | Claude |
+| `Filming - ` | vidéo de démonstration | Claude |
+| `Finishing - ` | étapes de clôture que le workflow prévoit une fois le travail validé, avant d'ouvrir la PR | Claude |
+| `Finished - ` | tout est au vert et finalisé : il ne reste qu'à placer la PR et à la fusionner ; le préfixe reste jusqu'au merge | Claude |
+| `Waiting on user - ` | fin de chaque tour de Claude, sauf une fois `Finished` | le mod |
+
+Quand l'utilisateur répond, le préfixe redevient `Coding`, ou `Finishing` si la carte était en finalisation. Le mod rappelle alors à Claude de corriger la phase si la réponse la change : un retour à corriger ramène à `Coding`, une validation ou « finalise » mène à `Finishing`.
+
+Claude change de phase par l'outil `card_phase` du mod, de lui-même ; on peut aussi le lui demander (« passe en Reviewing », « corrige les mots-clés »). La carte et sa phase sont mémorisées par séance. `/issue clear` arrête le renommage.
+
+Le mod renomme la conversation par l'outil de renommage de l'app desktop : il ne sert que dans l'app desktop.
+
 ## Configuration par projet (facultative)
 
 Pour une app hors Node ou à l'adresse fixe, un fichier `.claude/dev-cockpit.json` à la racine du projet :

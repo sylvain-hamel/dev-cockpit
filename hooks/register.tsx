@@ -1,7 +1,21 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { AppLink, Issue, Script, Snapshot, TaskCatalog } from '../types'
+import type { AppLink, Card, Issue, Script, Snapshot, TaskCatalog } from '../types'
+import {
+  PHASES,
+  atTurnEnd,
+  atUserPrompt,
+  resumeContext,
+  bareIssue,
+  cardOf,
+  cardTitle,
+  isPhase,
+  keywordsOf,
+  keywordsPrompt,
+  newCard,
+  withPhase,
+} from './card'
 import type { AppDir } from './lib'
 import {
   appDirsOf,
@@ -54,9 +68,26 @@ const MAX_DEPTH = 3
 const MAX_DIRS = 300
 const ITEM_GAP = 1
 const SECTION_GAP = 1
+const SET_TITLE = 'mcp__ccd_session_mgmt__set_session_title'
+const PHASE_TOOL = 'card_phase'
+const PHASE_TOOL_ID = `mcp__dev-cockpit__${PHASE_TOOL}`
+const PHASE_TOOL_DESCRIPTION = [
+  'Rename this conversation to show where the work on its GitHub issue (its card) stands: `<Phase> - #<issue> <keywords>`, for example `Coding - #1233 Role Admin`.',
+  'Call it yourself, without being asked, as soon as the work on the card moves to another phase.',
+  "When the project's instructions (AGENTS.md, CLAUDE.md) describe a workflow for a card, map each of its steps to the phase below whose intent it serves; otherwise use the plain meanings:",
+  '`coding`: building or fixing the card (implementation, tests, the checks that end the build, the changes asked for while the work is being validated);',
+  '`reviewing`: reviewing code or a pull request;',
+  '`filming`: recording a demo video of the card;',
+  '`finishing`: the closing steps the workflow lists once the work is validated and before the pull request is opened;',
+  '`finished`: the work is done, green and finalized, and only opening the pull request and merging it remain; it stays through the pull request and the merge.',
+  '`waiting` (Waiting on user) is set automatically when your turn ends. When the user answers, the title goes back to coding, or to finishing when you were finalizing; call this tool when their answer says otherwise.',
+  '`keywords`: at most 4 words that identify the card; pass them only to correct the current ones.',
+  '`issue`: the card number; pass it only when the session has no card yet or moves to another card.',
+].join(' ')
 
 const snapshot = atom({ plugin: 'dev-cockpit', key: 'snapshot' } as const, null)
 const issue = atom({ plugin: 'dev-cockpit', key: 'issue' } as const, null)
+const card = atom({ plugin: 'dev-cockpit', key: 'card' } as const, null)
 const catalog = atom({ plugin: 'dev-cockpit', key: 'catalog' } as const, null)
 const favorites = atom({ plugin: 'dev-cockpit', key: 'favorites' } as const, [])
 const labels = atom({ plugin: 'dev-cockpit', key: 'labels' } as const, {})
@@ -325,6 +356,121 @@ async function restoreIssue($: EngineInterface): Promise<void> {
   if (first !== undefined) await setIssue($, issueFromText(first.text) as number, 'prompt')
 }
 
+let appliedTitle: string | null = null
+
+async function cardKey($: EngineInterface): Promise<string> {
+  return `card:${await $.session.id()}`
+}
+
+async function saveCard($: EngineInterface, next: Card | null): Promise<void> {
+  await update($, card, () => next)
+  if (next === null) await $.store.delete(await cardKey($))
+  else await $.store.set(await cardKey($), next)
+}
+
+let isCardRestored = false
+
+/** The session's card, read back from the store the first time (a restart, a resume). */
+async function currentCard($: EngineInterface): Promise<Card | null> {
+  const held = await read($, card)
+  if (held !== null || isCardRestored) return held
+  isCardRestored = true
+  const stored = cardOf(await $.store.get(await cardKey($)))
+  if (stored !== null) await update($, card, () => stored)
+  return stored
+}
+
+async function keywordsFor($: EngineInterface, number: number, title: string | null): Promise<string | null> {
+  if (title === null) return null
+  try {
+    const reply = await $.model.complete({
+      model: 'haiku',
+      prompt: keywordsPrompt(number, title),
+      maxTokens: 40,
+      timeoutMs: 20000,
+    })
+    const picked = reply.isAnswered ? keywordsOf(reply.text) : null
+    if (picked !== null) return picked
+  } catch {
+    // the title's own first words below
+  }
+  return keywordsOf(title)
+}
+
+/** Renames the conversation through the desktop app's own tool, as Claude does when asked. */
+async function applyTitle($: EngineInterface, title: string): Promise<boolean> {
+  if (title === appliedTitle) return true
+  try {
+    const ran = await $.tool.call({ tool: SET_TITLE, session_id: 'self', title } as never)
+    const isRenamed = ran.deny === undefined && ran.isError !== true
+    if (isRenamed) appliedTitle = title
+    return isRenamed
+  } catch {
+    return false
+  }
+}
+
+async function showCard($: EngineInterface, next: Card): Promise<string | null> {
+  await saveCard($, next)
+  const title = cardTitle(next)
+  return (await applyTitle($, title)) ? title : null
+}
+
+async function prepareCard($: EngineInterface, number: number, source: Issue['source']): Promise<Card> {
+  const current = await currentCard($)
+  if (current?.issue === number && current.keywords !== null) return current
+  if ((await read($, issue))?.number !== number) await setIssue($, number, source)
+  const known = await read($, issue)
+  const title = known?.number === number && known.title !== null ? known.title : await issueTitle($, number)
+  const keywords = await keywordsFor($, number, title)
+  return current?.issue === number ? { ...current, keywords } : newCard(number, keywords)
+}
+
+async function startCard($: EngineInterface, number: number, source: Issue['source']): Promise<void> {
+  await showCard($, await prepareCard($, number, source))
+}
+
+/**
+ * A conversation opened with nothing but an issue is named after it, in the background.
+ * The user's answer lifts "Waiting on user"; the context returned tells Claude to correct
+ * the phase the title went back to.
+ */
+async function onPromptForCard($: EngineInterface, prompt: string): Promise<string | null> {
+  const current = await currentCard($)
+  const bare = bareIssue(prompt)
+  if (current === null && bare !== null) {
+    void startCard($, bare, 'prompt').catch(() => undefined)
+    return null
+  }
+  if (current === null || current.phase !== 'waiting') return null
+  const resumed = atUserPrompt(current)
+  void showCard($, resumed).catch(() => undefined)
+  return resumeContext(resumed)
+}
+
+async function onTurnEndForCard($: EngineInterface): Promise<void> {
+  const current = await currentCard($)
+  if (current !== null) await showCard($, atTurnEnd(current))
+}
+
+async function runPhaseTool($: EngineInterface, input: Record<string, unknown>): Promise<string> {
+  const { phase, keywords, issue: asked } = input
+  if (!isPhase(phase)) throw new Error(`phase must be one of: ${Object.keys(PHASES).join(', ')}`)
+  const number =
+    typeof asked === 'number' && Number.isInteger(asked) && asked > 0
+      ? asked
+      : (await currentCard($))?.issue ?? (await read($, issue))?.number ?? null
+  if (number === null) {
+    throw new Error('This session has no card yet: pass `issue`, the GitHub issue number the work is about.')
+  }
+  const prepared = await prepareCard($, number, 'command')
+  const corrected = typeof keywords === 'string' ? keywordsOf(keywords) : null
+  const title = await showCard($, withPhase({ ...prepared, keywords: corrected ?? prepared.keywords }, phase))
+  return title === null
+    ? `Phase set to ${PHASES[phase]}, but the app did not rename the conversation.`
+    : `Conversation renamed: ${title}`
+}
+
 async function openExternal($: EngineInterface, target: string): Promise<void> {
   await $.process.run(['rundll32.exe', 'url.dll,FileProtocolHandler', target])
 }
@@ -478,9 +624,24 @@ export const register: Register = on => {
       description: 'Set the GitHub issue this session is about',
       argumentHint: '<number | url | clear>',
     })
+    await $.tool.register({
+      name: PHASE_TOOL,
+      description: PHASE_TOOL_DESCRIPTION,
+      isDeferred: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          phase: { type: 'string', enum: Object.keys(PHASES), description: 'Where the work on the card stands now' },
+          keywords: { type: 'string', description: 'At most 4 words identifying the card, to correct the current ones' },
+          issue: { type: 'integer', description: 'The card (GitHub issue) number, when the session has none yet' },
+        },
+        required: ['phase'],
+      },
+    })
     const ran = await next(e)
     void $.ui.close({ id: LEGACY_PANE })
     void $.ui.close({ id: LEGACY_DIALOG })
+    await currentCard($)
     await restoreIssue($)
     void refreshAll($)
     $.clock.every(POLL_MS, () => refresh($))
@@ -497,17 +658,43 @@ export const register: Register = on => {
     const parsed = issueFromArgs(e.args)
     if (parsed === 'clear') {
       await clearIssue($)
+      await saveCard($, null)
       return { text: 'Session issue cleared.' }
     }
     if (parsed === null) return { text: 'Usage: /issue <number | url | clear>' }
     const set = await setIssue($, parsed, 'command')
-    return { text: set === null ? 'No GitHub remote found.' : `Session issue: #${parsed}` }
+    if (set === null) return { text: 'No GitHub remote found.' }
+    void startCard($, parsed, 'command').catch(() => undefined)
+    return { text: `Session issue: #${parsed}` }
   })
 
   on('prompt.submit', async ($, e, next) => {
     const mentioned = issueFromText(e.text)
-    if (mentioned !== null && (await read($, issue)) === null) void setIssue($, mentioned, 'prompt')
+    if (mentioned !== null && bareIssue(e.text) === null && (await read($, issue)) === null) {
+      void setIssue($, mentioned, 'prompt')
+    }
     return next(e)
+  })
+
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const isUser = e.source === undefined || e.source === 'user'
+    const context = isUser ? await onPromptForCard($, e.prompt) : null
+    const ran = await next(e)
+    return context === null ? ran : { ...ran, additionalContext: [...(ran.additionalContext ?? []), context] }
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const ran = await next(e)
+    if (e.agentId === undefined) void onTurnEndForCard($).catch(() => undefined)
+    return ran
+  })
+
+  on('tool.run', { tool: PHASE_TOOL_ID }, async ($, e) => {
+    try {
+      return { result: await runPhaseTool($, e as unknown as Record<string, unknown>) }
+    } catch (error) {
+      return { deny: error instanceof Error ? error.message : String(error) }
+    }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
