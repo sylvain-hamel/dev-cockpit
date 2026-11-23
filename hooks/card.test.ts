@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { atTurnEnd, atUserPrompt, bareIssue, cardOf, cardTitle, keywordsOf, newCard, withPhase } from './card'
+import { atTurnEnd, atWorkResumed, bareIssue, cardOf, cardTitle, keywordsOf, newCard, withPhase } from './card'
 
 const SET_TITLE = 'mcp__ccd_session_mgmt__set_session_title'
 const PHASE_TOOL = 'mcp__dev-cockpit__card_phase'
@@ -29,6 +29,7 @@ describe('card helpers', () => {
   test('the title puts the phase in front of the card', async () => {
     const card = newCard(1233, 'Role Admin')
     expect(cardTitle(card)).toBe('#1233 Role Admin')
+    expect(cardTitle(withPhase(card, 'grilling'))).toBe('Grilling - #1233 Role Admin')
     expect(cardTitle(withPhase(card, 'coding'))).toBe('Coding - #1233 Role Admin')
     expect(cardTitle(withPhase(card, 'reviewing'))).toBe('Reviewing - #1233 Role Admin')
     expect(cardTitle(withPhase(card, 'filming'))).toBe('Filming - #1233 Role Admin')
@@ -38,20 +39,19 @@ describe('card helpers', () => {
     expect(cardTitle(newCard(7, null))).toBe('#7')
   })
 
-  test('after waiting on the user, the card goes back to coding, or to finishing', async () => {
+  test('after waiting on the user, the card goes back to the phase it was in', async () => {
     const card = newCard(1, 'x')
-    const after = (phase: 'coding' | 'reviewing' | 'filming' | 'finishing') =>
-      atUserPrompt(atTurnEnd(withPhase(card, phase))).phase
-    expect(atTurnEnd(withPhase(card, 'coding')).phase).toBe('waiting')
-    expect(after('coding')).toBe('coding')
-    expect(after('reviewing')).toBe('coding')
-    expect(after('filming')).toBe('coding')
-    expect(after('finishing')).toBe('finishing')
-    expect(atUserPrompt(withPhase(atTurnEnd(withPhase(card, 'finishing')), 'waiting')).phase).toBe('finishing')
-    expect(atUserPrompt(atTurnEnd(card)).phase).toBeNull()
+    for (const phase of ['coding', 'reviewing', 'filming', 'finishing'] as const) {
+      const waiting = atTurnEnd(withPhase(card, phase))
+      expect(waiting.phase).toBe('waiting')
+      expect(atWorkResumed(waiting).phase).toBe(phase)
+      expect(atWorkResumed(withPhase(waiting, 'waiting')).phase).toBe(phase)
+    }
+    expect(atWorkResumed(atTurnEnd(card)).phase).toBeNull()
   })
 
-  test('finished stays through the end of a turn', async () => {
+  test('grilling and finished stay through the end of a turn', async () => {
+    expect(atTurnEnd(withPhase(newCard(1, 'x'), 'grilling')).phase).toBe('grilling')
     expect(atTurnEnd(withPhase(newCard(1, 'x'), 'finished')).phase).toBe('finished')
   })
 
@@ -63,7 +63,7 @@ describe('card helpers', () => {
   })
 })
 
-type Session = { titles: string[]; store?: Record<string, unknown> }
+type Session = { titles: string[]; store?: Record<string, unknown>; agents?: unknown[] }
 
 function ok(stdout: string) {
   return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -71,7 +71,10 @@ function ok(stdout: string) {
 
 function mockSession(on: On, session: Session): void {
   mock.store(on, session.store ?? {})
-  on('classic.UserPromptSubmit', () => ({}))
+  on('prompt.submit', ($, e) => ({ text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('classic.Stop', () => ({}))
+  on('agent.list', () => ({ value: session.agents ?? [] }) as never)
   on('turn.complete', () => ({ text: '' }))
   on('session.id', () => ({ value: 'S1' }))
   on('session.messages', () => ({ value: [] }) as never)
@@ -97,15 +100,24 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 500; i += 1) await Promise.resolve()
 }
 
-type Turns = { turn: { complete: (e: unknown) => Promise<unknown> } }
+type Turns = { turn: { start: (e: unknown) => Promise<unknown>; complete: (e: unknown) => Promise<unknown> } }
+type Prompts = { prompt: { submit: (e: unknown) => Promise<{ text?: string; context?: readonly string[] }> } }
 
-async function endTurn($: Engine): Promise<void> {
+async function endTurn($: Engine, background: unknown[] = []): Promise<void> {
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: background } as never)
   await ($ as unknown as Turns).turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
   await settle()
 }
 
+async function startTurn($: Engine): Promise<void> {
+  await ($ as unknown as Turns).turn.start({ text: '', turnId: 't2' })
+  await settle()
+}
+
 async function prompt($: Engine, text: string) {
-  return $.classic.UserPromptSubmit({ prompt: text, source: 'user' })
+  const answered = await ($ as unknown as Prompts).prompt.submit({ text, wait: false })
+  await startTurn($)
+  return { additionalContext: answered.context }
 }
 
 test('an issue alone names the conversation, and the phase prefixes it', async ($, on) => {
@@ -178,4 +190,34 @@ test('the user answer after waiting brings back the phase and asks Claude to cor
   const later = await prompt($, 'place la PR')
   expect(session.titles.at(-1)).toBe('Finished - #9 Export')
   expect(later.additionalContext).toBeUndefined()
+})
+
+test('a turn that leaves background work running does not wait on the user', async ($, on) => {
+  const session: Session = {
+    titles: [],
+    store: { 'card:S1': { issue: 1721, keywords: 'Résumé IA', phase: 'reviewing', resume: null } },
+    agents: [{ id: 'a1', kind: 'local_agent', status: 'running', taskStatus: 'running', type: 'general-purpose' }],
+  }
+  mockSession(on, session)
+
+  await endTurn($)
+  expect(session.titles).toEqual([])
+
+  session.agents = []
+  await endTurn($, [{ id: 'b1', type: 'shell', status: 'running', description: 'yarn test' }])
+  expect(session.titles).toEqual([])
+
+  await endTurn($)
+  expect(session.titles.at(-1)).toBe('Waiting on user - #1721 Résumé IA')
+})
+
+test('a turn started by a notification lifts the wait', async ($, on) => {
+  const session: Session = {
+    titles: [],
+    store: { 'card:S1': { issue: 1721, keywords: 'Résumé IA', phase: 'waiting', resume: 'reviewing' } },
+  }
+  mockSession(on, session)
+
+  await startTurn($)
+  expect(session.titles.at(-1)).toBe('Reviewing - #1721 Résumé IA')
 })

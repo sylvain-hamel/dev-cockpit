@@ -5,7 +5,7 @@ import type { AppLink, Card, Issue, Script, Snapshot, TaskCatalog } from '../typ
 import {
   PHASES,
   atTurnEnd,
-  atUserPrompt,
+  atWorkResumed,
   resumeContext,
   bareIssue,
   cardOf,
@@ -75,12 +75,13 @@ const PHASE_TOOL_DESCRIPTION = [
   'Rename this conversation to show where the work on its GitHub issue (its card) stands: `<Phase> - #<issue> <keywords>`, for example `Coding - #1233 Role Admin`.',
   'Call it yourself, without being asked, as soon as the work on the card moves to another phase.',
   "When the project's instructions (AGENTS.md, CLAUDE.md) describe a workflow for a card, map each of its steps to the phase below whose intent it serves; otherwise use the plain meanings:",
+  '`grilling`: settling the card with the user before or between builds: its open questions, decisions and spec; it stays while you wait on each answer;',
   '`coding`: building or fixing the card (implementation, tests, the checks that end the build, the changes asked for while the work is being validated);',
   '`reviewing`: reviewing code or a pull request;',
   '`filming`: recording a demo video of the card;',
   '`finishing`: the closing steps the workflow lists once the work is validated and before the pull request is opened;',
   '`finished`: the work is done, green and finalized, and only opening the pull request and merging it remain; it stays through the pull request and the merge.',
-  '`waiting` (Waiting on user) is set automatically when your turn ends. When the user answers, the title goes back to coding, or to finishing when you were finalizing; call this tool when their answer says otherwise.',
+  '`waiting` (Waiting on user) is set automatically when your turn ends, except in grilling and finished. When the user answers, the title goes back to the phase it was in; call this tool only when their answer clearly moves the card to another phase, and keep the phase when unsure.',
   '`keywords`: at most 4 words that identify the card; pass them only to correct the current ones.',
   '`issue`: the card number; pass it only when the session has no card yet or moves to another card.',
 ].join(' ')
@@ -443,14 +444,48 @@ async function onPromptForCard($: EngineInterface, prompt: string): Promise<stri
     return null
   }
   if (current === null || current.phase !== 'waiting') return null
-  const resumed = atUserPrompt(current)
+  const resumed = atWorkResumed(current)
+  await saveCard($, resumed)
   void showCard($, resumed).catch(() => undefined)
   return resumeContext(resumed)
 }
 
-async function onTurnEndForCard($: EngineInterface): Promise<void> {
+/**
+ * Any turn of the main conversation lifts "Waiting on user": Claude works again. A turn
+ * the user's answer started was already handled at the prompt; this one is a notification's.
+ */
+async function onTurnStartForCard($: EngineInterface): Promise<void> {
   const current = await currentCard($)
-  if (current !== null) await showCard($, atTurnEnd(current))
+  if (current !== null && current.phase === 'waiting') await showCard($, atWorkResumed(current))
+}
+
+/** Work Claude left running at the end of its turn, as the session's last Stop listed it. */
+let backgroundAtStop = 0
+
+async function hasRunningAgents($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.agent.list()).some(agent =>
+      agent.kind === 'local_agent'
+        ? agent.taskStatus === 'running' || agent.taskStatus === 'pending'
+        : agent.status === 'running',
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A turn that ends while subagents or background tasks still run is no question to the
+ * user: their notification starts the next turn. Only a turn that leaves nothing running
+ * waits on the user.
+ */
+async function onTurnEndForCard($: EngineInterface): Promise<void> {
+  const leftRunning = backgroundAtStop
+  backgroundAtStop = 0
+  const current = await currentCard($)
+  if (current === null) return
+  if (leftRunning > 0 || (await hasRunningAgents($))) return
+  await showCard($, atTurnEnd(current))
 }
 
 async function runPhaseTool($: EngineInterface, input: Record<string, unknown>): Promise<string> {
@@ -673,14 +708,19 @@ export const register: Register = on => {
     if (mentioned !== null && bareIssue(e.text) === null && (await read($, issue)) === null) {
       void setIssue($, mentioned, 'prompt')
     }
-    return next(e)
+    const context = e.isMeta === true ? null : await onPromptForCard($, e.text)
+    return next(context === null ? e : { ...e, context: [...(e.context ?? []), context] })
   })
 
-  on('classic.UserPromptSubmit', async ($, e, next) => {
-    const isUser = e.source === undefined || e.source === 'user'
-    const context = isUser ? await onPromptForCard($, e.prompt) : null
+  on('turn.start', async ($, e, next) => {
     const ran = await next(e)
-    return context === null ? ran : { ...ran, additionalContext: [...(ran.additionalContext ?? []), context] }
+    if (e.agentId === undefined) void onTurnStartForCard($).catch(() => undefined)
+    return ran
+  })
+
+  on('classic.Stop', async ($, e, next) => {
+    backgroundAtStop = e.background_tasks?.length ?? 0
+    return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {

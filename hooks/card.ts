@@ -1,6 +1,7 @@
 import type { Card, Phase } from '../types'
 
 export const PHASES: Readonly<Record<Phase, string>> = {
+  grilling: 'Grilling',
   coding: 'Coding',
   reviewing: 'Reviewing',
   filming: 'Filming',
@@ -50,28 +51,36 @@ export function withPhase(card: Card, phase: Phase): Card {
   return { ...card, phase, resume: card.phase === 'waiting' ? card.resume : card.phase }
 }
 
-/** The card once Claude's turn ends: waiting on the user, unless the work is finished. */
+/** Phases where Claude's turn ending on the user is the phase itself, not a wait. */
+const HOLDS_AT_TURN_END: ReadonlySet<Phase | null> = new Set<Phase | null>(['grilling', 'finished', 'waiting'])
+
+/**
+ * The card once Claude's turn ends: waiting on the user, unless the phase already says so.
+ * A grilling asks the user a question each turn, and a finished card waits on their
+ * pull request and merge.
+ */
 export function atTurnEnd(card: Card): Card {
-  if (card.phase === 'finished' || card.phase === 'waiting') return card
+  if (HOLDS_AT_TURN_END.has(card.phase)) return card
   return { ...card, phase: 'waiting', resume: card.phase }
 }
 
 /**
- * The card once the user answers: back to coding, or to finishing when the card was being
- * finalized. Claude moves it elsewhere when the answer says so (work validated, feedback).
+ * The card once Claude works again, on the user's answer or a notification: back to the
+ * phase it was in. Claude moves it elsewhere only when the answer clearly says so.
  */
-export function atUserPrompt(card: Card): Card {
+export function atWorkResumed(card: Card): Card {
   if (card.phase !== 'waiting') return card
-  const phase = card.resume === null ? null : card.resume === 'finishing' ? 'finishing' : 'coding'
-  return { ...card, phase, resume: null }
+  return { ...card, phase: card.resume, resume: null }
 }
 
 /** What Claude reads with the user's answer, so it corrects the phase the title went back to. */
 export function resumeContext(card: Card): string {
   return [
     `dev-cockpit: the user answered, and the conversation title is now "${cardTitle(card)}".`,
-    `If their message moves card #${card.issue} to another phase, call card_phase before anything else:`,
-    'feedback or changes to make → coding; work validated, or asked to finalize → finishing;',
+    `If their message clearly moves card #${card.issue} to another phase, call card_phase before anything else;`,
+    'when unsure, keep the phase. For example:',
+    'a question to settle or the spec to refine → grilling; feedback or changes to make → coding;',
+    'work validated, or asked to finalize → finishing;',
     'everything finalized, only the pull request and the merge left → finished.',
   ].join(' ')
 }

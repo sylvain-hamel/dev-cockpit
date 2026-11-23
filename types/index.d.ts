@@ -41,7 +41,7 @@ export type Issue = {
   source: 'command' | 'prompt' | 'branch'
 }
 
-export type Phase = 'coding' | 'reviewing' | 'filming' | 'finishing' | 'finished' | 'waiting'
+export type Phase = 'grilling' | 'coding' | 'reviewing' | 'filming' | 'finishing' | 'finished' | 'waiting'
 
 export type Card = {
   issue: number
