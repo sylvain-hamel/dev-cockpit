@@ -105,3 +105,37 @@ export function keywordsPrompt(issue: number, title: string): string {
     'separated by spaces, on one line. No issue number, no punctuation, no quotes, nothing else.',
   ].join('\n')
 }
+
+type TranscriptRow = {
+  role: 'user' | 'assistant'
+  text: string
+  toolUses: readonly { result?: unknown }[]
+}
+
+const NOTIFICATION = /<task-notification>([\s\S]*?)<\/task-notification>/g
+const TASK_ID = /<task-id>([^<]+)<\/task-id>/
+const ENDED = /<status>(?:completed|failed|killed|stopped|cancelled)<\/status>/
+
+/**
+ * The background tasks Claude launched (a Bash or PowerShell command sent to the background)
+ * whose end no task notification has reported yet.
+ */
+export function runningBackgroundTasks(rows: readonly TranscriptRow[]): string[] {
+  const launched = new Set<string>()
+  const ended = new Set<string>()
+  for (const row of rows) {
+    if (row.role === 'assistant') {
+      for (const use of row.toolUses) {
+        const id = (use.result as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId
+        if (typeof id === 'string' && id !== '') launched.add(id)
+      }
+    } else {
+      for (const [, block = ''] of row.text.matchAll(NOTIFICATION)) {
+        const id = TASK_ID.exec(block)?.[1]
+        if (id !== undefined && ENDED.test(block)) ended.add(id)
+      }
+    }
+  }
+  return [...launched].filter(id => !ended.has(id))
+}
+

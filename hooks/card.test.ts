@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { atTurnEnd, atWorkResumed, bareIssue, cardOf, cardTitle, keywordsOf, newCard, withPhase } from './card'
+import { atTurnEnd, atWorkResumed, bareIssue, runningBackgroundTasks, cardOf, cardTitle, keywordsOf, newCard, withPhase } from './card'
 
 const SET_TITLE = 'mcp__ccd_session_mgmt__set_session_title'
 const PHASE_TOOL = 'mcp__dev-cockpit__card_phase'
@@ -55,6 +55,23 @@ describe('card helpers', () => {
     expect(atTurnEnd(withPhase(newCard(1, 'x'), 'finished')).phase).toBe('finished')
   })
 
+  test('a background command runs until its notification reports its end', async () => {
+    const launch = (id: string) => ({ role: 'assistant' as const, text: '', toolUses: [{ result: { stdout: '', backgroundTaskId: id } }] })
+    const note = (id: string, status: string) => ({
+      role: 'user' as const,
+      text: `<task-notification>
+<task-id>${id}</task-id>
+<status>${status}</status>
+</task-notification>`,
+      toolUses: [],
+    })
+    expect(runningBackgroundTasks([launch('b1'), launch('b2')])).toEqual(['b1', 'b2'])
+    expect(runningBackgroundTasks([launch('b1'), launch('b2'), note('b1', 'completed')])).toEqual(['b2'])
+    expect(runningBackgroundTasks([launch('b1'), note('b1', 'killed')])).toEqual([])
+    expect(runningBackgroundTasks([launch('b1'), { ...note('x', 'running'), text: note('x', 'running').text + note('b2', 'completed').text }])).toEqual(['b1'])
+    expect(runningBackgroundTasks([{ role: 'assistant', text: '', toolUses: [{ result: { stdout: 'ok' } }] }])).toEqual([])
+  })
+
   test('a stored card is read back, junk is not', async () => {
     const card = withPhase(newCard(5, 'a b'), 'reviewing')
     expect(cardOf(JSON.parse(JSON.stringify(card)))).toEqual(card)
@@ -63,7 +80,7 @@ describe('card helpers', () => {
   })
 })
 
-type Session = { titles: string[]; store?: Record<string, unknown>; agents?: unknown[] }
+type Session = { titles: string[]; store?: Record<string, unknown>; agents?: unknown[]; messages?: unknown[] }
 
 function ok(stdout: string) {
   return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -77,7 +94,7 @@ function mockSession(on: On, session: Session): void {
   on('agent.list', () => ({ value: session.agents ?? [] }) as never)
   on('turn.complete', () => ({ text: '' }))
   on('session.id', () => ({ value: 'S1' }))
-  on('session.messages', () => ({ value: [] }) as never)
+  on('session.messages', () => ({ value: session.messages ?? [] }) as never)
   on('session.cwd', () => ({ value: 'C:/work/app' }))
   on('session.repo', () => ({
     value: { root: 'C:/work/app', remote: 'https://github.com/acme/app.git', internal: false, name: 'app' },
@@ -206,6 +223,16 @@ test('a turn that leaves background work running does not wait on the user', asy
   session.agents = []
   await endTurn($, [{ id: 'b1', type: 'shell', status: 'running', description: 'yarn test' }])
   expect(session.titles).toEqual([])
+
+  session.messages = [{ role: 'assistant', text: '', toolUses: [{ tool: 'Bash', result: { backgroundTaskId: 'b7' } }] }]
+  await endTurn($)
+  expect(session.titles).toEqual([])
+
+  session.messages.push({
+    role: 'user',
+    text: '<task-notification><task-id>b7</task-id><status>completed</status></task-notification>',
+    toolUses: [],
+  })
 
   await endTurn($)
   expect(session.titles.at(-1)).toBe('Waiting on user - #1721 Résumé IA')

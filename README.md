@@ -46,10 +46,10 @@ Au fil du travail, un préfixe indique où en est la carte. Les phases sont gén
 | `Grilling - ` | mise au point de la carte avec l'utilisateur, avant ou entre deux constructions : questions ouvertes, décisions, spécification ; le préfixe reste pendant que Claude attend chaque réponse | Claude |
 | `Coding - ` | construction de la carte, ses vérifications de fin, les retouches demandées pendant la validation | Claude |
 | `Reviewing - ` | revue du code ou d'une PR | Claude |
-| `Filming - ` | vidéo de démonstration | Claude |
+| `Filming - ` | toute vidéo de la carte : démonstration ou annonce | Claude |
 | `Finishing - ` | étapes de clôture que le workflow prévoit une fois le travail validé, avant d'ouvrir la PR | Claude |
 | `Finished - ` | tout est au vert et finalisé : il ne reste qu'à placer la PR et à la fusionner ; le préfixe reste jusqu'au merge | Claude |
-| `Waiting on user - ` | fin d'un tour de Claude qui ne laisse rien tourner en arrière-plan (sous-agents, tâches), sauf en `Grilling` et en `Finished` | le mod |
+| `Waiting on user - ` | fin d'un tour de Claude qui ne laisse rien tourner en arrière-plan (sous-agents, commandes de fond), sauf en `Grilling` et en `Finished` | le mod |
 
 Quand Claude reprend le travail, sur la réponse de l'utilisateur ou sur la notification d'une tâche de fond, le préfixe redevient la phase d'avant, quelle qu'elle soit. Avec la réponse de l'utilisateur, le mod rappelle à Claude de changer la phase seulement si la réponse la déplace clairement : une question à trancher mène à `Grilling`, un retour à corriger ramène à `Coding`, une validation ou « finalise » mène à `Finishing`. Dans le doute, Claude garde la phase.
 

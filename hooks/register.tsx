@@ -7,6 +7,7 @@ import {
   atTurnEnd,
   atWorkResumed,
   resumeContext,
+  runningBackgroundTasks,
   bareIssue,
   cardOf,
   cardTitle,
@@ -78,7 +79,7 @@ const PHASE_TOOL_DESCRIPTION = [
   '`grilling`: settling the card with the user before or between builds: its open questions, decisions and spec; it stays while you wait on each answer;',
   '`coding`: building or fixing the card (implementation, tests, the checks that end the build, the changes asked for while the work is being validated);',
   '`reviewing`: reviewing code or a pull request;',
-  '`filming`: recording a demo video of the card;',
+  '`filming`: recording any video of the card, a demo or an announcement, in whichever phase it comes;',
   '`finishing`: the closing steps the workflow lists once the work is validated and before the pull request is opened;',
   '`finished`: the work is done, green and finalized, and only opening the pull request and merging it remain; it stays through the pull request and the merge.',
   '`waiting` (Waiting on user) is set automatically when your turn ends, except in grilling and finished. When the user answers, the title goes back to the phase it was in; call this tool only when their answer clearly moves the card to another phase, and keep the phase when unsure.',
@@ -462,7 +463,12 @@ async function onTurnStartForCard($: EngineInterface): Promise<void> {
 /** Work Claude left running at the end of its turn, as the session's last Stop listed it. */
 let backgroundAtStop = 0
 
-async function hasRunningAgents($: EngineInterface): Promise<boolean> {
+async function hasBackgroundWork($: EngineInterface): Promise<boolean> {
+  try {
+    if (runningBackgroundTasks(await $.session.messages()).length > 0) return true
+  } catch {
+    // the agents below
+  }
   try {
     return (await $.agent.list()).some(agent =>
       agent.kind === 'local_agent'
@@ -484,7 +490,7 @@ async function onTurnEndForCard($: EngineInterface): Promise<void> {
   backgroundAtStop = 0
   const current = await currentCard($)
   if (current === null) return
-  if (leftRunning > 0 || (await hasRunningAgents($))) return
+  if (leftRunning > 0 || (await hasBackgroundWork($))) return
   await showCard($, atTurnEnd(current))
 }
 
