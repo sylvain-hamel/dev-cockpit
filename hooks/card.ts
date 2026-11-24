@@ -73,13 +73,18 @@ export function atWorkResumed(card: Card): Card {
   return { ...card, phase: card.resume, resume: null }
 }
 
-/** What Claude reads with the user's answer, so it corrects the phase the title went back to. */
+/** Phases the user's answer can end without Claude noticing: a wait, a grilling, a finished card. */
+export function remindsAtPrompt(card: Card): boolean {
+  return card.phase === 'waiting' || card.phase === 'grilling' || card.phase === 'finished'
+}
+
+/** What Claude reads with the user's answer, so it corrects the phase the title shows. */
 export function resumeContext(card: Card): string {
   return [
-    `dev-cockpit: the user answered, and the conversation title is now "${cardTitle(card)}".`,
+    `dev-cockpit: the user answered, and the conversation title is "${cardTitle(card)}".`,
     `If their message clearly moves card #${card.issue} to another phase, call card_phase before anything else;`,
     'when unsure, keep the phase. For example:',
-    'a question to settle or the spec to refine → grilling; feedback or changes to make → coding;',
+    'a question to settle or the spec to refine → grilling; the go-ahead to build, feedback or changes to make → coding;',
     'work validated, or asked to finalize → finishing;',
     'everything finalized, only the pull request and the merge left → finished.',
   ].join(' ')
@@ -139,3 +144,11 @@ export function runningBackgroundTasks(rows: readonly TranscriptRow[]): string[]
   return [...launched].filter(id => !ended.has(id))
 }
 
+/** Phases where Claude editing files likely means the card moved on without its title. */
+export function editContext(card: Card): string | null {
+  if (card.phase !== 'grilling' && card.phase !== 'finished') return null
+  return [
+    `dev-cockpit: the conversation title still says "${cardTitle(card)}", and you are now changing files.`,
+    `If the work on card #${card.issue} moved to another phase (building or fixing it → coding), call card_phase now.`,
+  ].join(' ')
+}

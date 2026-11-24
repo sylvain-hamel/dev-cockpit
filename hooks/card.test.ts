@@ -90,7 +90,6 @@ function mockSession(on: On, session: Session): void {
   mock.store(on, session.store ?? {})
   on('prompt.submit', ($, e) => ({ text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('classic.Stop', () => ({}))
   on('agent.list', () => ({ value: session.agents ?? [] }) as never)
   on('turn.complete', () => ({ text: '' }))
   on('session.id', () => ({ value: 'S1' }))
@@ -120,8 +119,7 @@ async function settle(): Promise<void> {
 type Turns = { turn: { start: (e: unknown) => Promise<unknown>; complete: (e: unknown) => Promise<unknown> } }
 type Prompts = { prompt: { submit: (e: unknown) => Promise<{ text?: string; context?: readonly string[] }> } }
 
-async function endTurn($: Engine, background: unknown[] = []): Promise<void> {
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: background } as never)
+async function endTurn($: Engine): Promise<void> {
   await ($ as unknown as Turns).turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
   await settle()
 }
@@ -206,7 +204,7 @@ test('the user answer after waiting brings back the phase and asks Claude to cor
   await endTurn($)
   const later = await prompt($, 'place la PR')
   expect(session.titles.at(-1)).toBe('Finished - #9 Export')
-  expect(later.additionalContext).toBeUndefined()
+  expect(later.additionalContext?.join(' ')).toContain('"Finished - #9 Export"')
 })
 
 test('a turn that leaves background work running does not wait on the user', async ($, on) => {
@@ -221,9 +219,6 @@ test('a turn that leaves background work running does not wait on the user', asy
   expect(session.titles).toEqual([])
 
   session.agents = []
-  await endTurn($, [{ id: 'b1', type: 'shell', status: 'running', description: 'yarn test' }])
-  expect(session.titles).toEqual([])
-
   session.messages = [{ role: 'assistant', text: '', toolUses: [{ tool: 'Bash', result: { backgroundTaskId: 'b7' } }] }]
   await endTurn($)
   expect(session.titles).toEqual([])
@@ -247,4 +242,31 @@ test('a turn started by a notification lifts the wait', async ($, on) => {
 
   await startTurn($)
   expect(session.titles.at(-1)).toBe('Reviewing - #1721 Résumé IA')
+})
+
+test('after a grilling, the go-ahead and the first file edit remind Claude to leave grilling', async ($, on) => {
+  const session: Session = {
+    titles: [],
+    store: { 'card:S1': { issue: 1783, keywords: 'Portail équipe', phase: 'grilling', resume: null } },
+  }
+  mockSession(on, session)
+  on('tool.call', { tool: 'Edit' } as never, () => ({ result: { filePath: 'a.ts' } }) as never)
+
+  await endTurn($)
+  expect(session.titles.at(-1)).toBe('Grilling - #1783 Portail équipe')
+
+  const answered = await prompt($, 'oui, vas-y')
+  expect(answered.additionalContext?.join(' ')).toContain('"Grilling - #1783 Portail équipe"')
+  expect(answered.additionalContext?.join(' ')).toContain('the go-ahead to build')
+
+  const edit = () => $.tool.call({ tool: 'Edit', file_path: 'a.ts', old_string: 'a', new_string: 'b' } as never)
+  const first = await edit()
+  expect(JSON.stringify(first)).toContain('call card_phase now')
+  const second = await edit()
+  expect(JSON.stringify(second)).not.toContain('call card_phase now')
+
+  await $.tool.call({ tool: PHASE_TOOL, phase: 'coding' } as never)
+  const coding = await edit()
+  expect(JSON.stringify(coding)).not.toContain('call card_phase now')
+  expect(session.titles.at(-1)).toBe('Coding - #1783 Portail équipe')
 })

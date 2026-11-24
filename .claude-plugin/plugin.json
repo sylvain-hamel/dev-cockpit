@@ -1,6 +1,6 @@
 {
   "name": "dev-cockpit",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Band showing the active worktree, the apps to launch, favorite tasks and the session's GitHub issue; names the conversation after its card and phase",
   "author": { "name": "Sylvain Hamel" },
   "types": "./types/index.d.ts"

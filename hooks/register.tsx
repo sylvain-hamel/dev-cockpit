@@ -6,6 +6,8 @@ import {
   PHASES,
   atTurnEnd,
   atWorkResumed,
+  remindsAtPrompt,
+  editContext,
   resumeContext,
   runningBackgroundTasks,
   bareIssue,
@@ -444,11 +446,27 @@ async function onPromptForCard($: EngineInterface, prompt: string): Promise<stri
     void startCard($, bare, 'prompt').catch(() => undefined)
     return null
   }
-  if (current === null || current.phase !== 'waiting') return null
+  if (current === null || !remindsAtPrompt(current)) return null
+  if (current.phase !== 'waiting') return resumeContext(current)
   const resumed = atWorkResumed(current)
   await saveCard($, resumed)
   void showCard($, resumed).catch(() => undefined)
   return resumeContext(resumed)
+}
+
+const EDIT_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'NotebookEdit'])
+
+/** The card and phase Claude was last reminded of while editing: once per phase is enough. */
+let editRemindedFor: string | null = null
+
+async function editContextOnce($: EngineInterface): Promise<string | null> {
+  const current = await currentCard($)
+  const context = current === null ? null : editContext(current)
+  if (current === null || context === null) return null
+  const key = `${current.issue}:${current.phase}`
+  if (editRemindedFor === key) return null
+  editRemindedFor = key
+  return context
 }
 
 /**
@@ -459,9 +477,6 @@ async function onTurnStartForCard($: EngineInterface): Promise<void> {
   const current = await currentCard($)
   if (current !== null && current.phase === 'waiting') await showCard($, atWorkResumed(current))
 }
-
-/** Work Claude left running at the end of its turn, as the session's last Stop listed it. */
-let backgroundAtStop = 0
 
 async function hasBackgroundWork($: EngineInterface): Promise<boolean> {
   try {
@@ -486,11 +501,9 @@ async function hasBackgroundWork($: EngineInterface): Promise<boolean> {
  * waits on the user.
  */
 async function onTurnEndForCard($: EngineInterface): Promise<void> {
-  const leftRunning = backgroundAtStop
-  backgroundAtStop = 0
   const current = await currentCard($)
   if (current === null) return
-  if (leftRunning > 0 || (await hasBackgroundWork($))) return
+  if (await hasBackgroundWork($)) return
   await showCard($, atTurnEnd(current))
 }
 
@@ -724,15 +737,17 @@ export const register: Register = on => {
     return ran
   })
 
-  on('classic.Stop', async ($, e, next) => {
-    backgroundAtStop = e.background_tasks?.length ?? 0
-    return next(e)
-  })
-
   on('turn.complete', async ($, e, next) => {
     const ran = await next(e)
     if (e.agentId === undefined) void onTurnEndForCard($).catch(() => undefined)
     return ran
+  })
+
+  on('tool.call', async ($, e, next) => {
+    const ran = await next(e)
+    if (!EDIT_TOOLS.has(e.tool) || ran.deny !== undefined || ran.isError === true) return ran
+    const context = await editContextOnce($)
+    return context === null ? ran : { ...ran, context: [...(ran.context ?? []), context] }
   })
 
   on('tool.run', { tool: PHASE_TOOL_ID }, async ($, e) => {
