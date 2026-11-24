@@ -72,6 +72,16 @@ describe('card helpers', () => {
     expect(runningBackgroundTasks([{ role: 'assistant', text: '', toolUses: [{ result: { stdout: 'ok' } }] }])).toEqual([])
   })
 
+  test('a background command that outlived a message of the user, such as a dev server, is not awaited', async () => {
+    const launch = (id: string) => ({ role: 'assistant' as const, text: '', toolUses: [{ result: { stdout: '', backgroundTaskId: id } }] })
+    const user = (text: string) => ({ role: 'user' as const, text, toolUses: [] })
+    const notification = user('<task-notification><task-id>a1</task-id><status>completed</status></task-notification>')
+    expect(runningBackgroundTasks([launch('dev'), user('go implemente')])).toEqual([])
+    expect(runningBackgroundTasks([launch('dev'), user('go'), launch('test')])).toEqual(['test'])
+    expect(runningBackgroundTasks([launch('test'), notification])).toEqual(['test'])
+    expect(runningBackgroundTasks([launch('test'), user('<system-reminder>x</system-reminder>')])).toEqual(['test'])
+  })
+
   test('a stored card is read back, junk is not', async () => {
     const card = withPhase(newCard(5, 'a b'), 'reviewing')
     expect(cardOf(JSON.parse(JSON.stringify(card)))).toEqual(card)

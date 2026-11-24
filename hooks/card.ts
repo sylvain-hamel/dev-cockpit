@@ -121,14 +121,22 @@ const NOTIFICATION = /<task-notification>([\s\S]*?)<\/task-notification>/g
 const TASK_ID = /<task-id>([^<]+)<\/task-id>/
 const ENDED = /<status>(?:completed|failed|killed|stopped|cancelled)<\/status>/
 
+/** A message the user wrote, not a task notification, a reminder or a bare tool result. */
+function isUserPrompt(row: TranscriptRow): boolean {
+  const text = row.text.trim()
+  return row.role === 'user' && text !== '' && !text.includes('<task-notification>') && !text.startsWith('<system-reminder>')
+}
+
 /**
  * The background tasks Claude launched (a Bash or PowerShell command sent to the background)
- * whose end no task notification has reported yet.
+ * since the user's last message, whose end no task notification has reported yet. A command
+ * that outlived a message of the user's, such as a dev server, is no work the user waits on.
  */
 export function runningBackgroundTasks(rows: readonly TranscriptRow[]): string[] {
   const launched = new Set<string>()
   const ended = new Set<string>()
   for (const row of rows) {
+    if (isUserPrompt(row)) launched.clear()
     if (row.role === 'assistant') {
       for (const use of row.toolUses) {
         const id = (use.result as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId
